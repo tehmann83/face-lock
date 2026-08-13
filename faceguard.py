@@ -93,6 +93,7 @@ TOLERANCE       = 0.55   # 0.4 = very strict, 0.6 = lenient
 CHECK_INTERVAL  = 0.2    # seconds between recognition checks (idle; skipped while streak builds)
 FRAMES_TO_LOCK       = 2   # consecutive unknown-face frames needed to trigger lock
 DETECT_SCALE         = 0.5 # resize factor before face detection — 4× faster, same accuracy
+PREVIEW_WIDTH        = 320 # preview window display width in pixels
 LOCK_COOLDOWN        = 15  # seconds to wait before locking again
 OWNER_GRACE          = 5.0 # seconds: suppress locking if owner was seen this recently
 
@@ -248,8 +249,7 @@ def enroll() -> None:
     if not cap.isOpened():
         sys.exit("ERROR: Cannot open camera. Check System Settings → Privacy → Camera.")
 
-    cv2.namedWindow("FaceGuard — Enrollment", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("FaceGuard — Enrollment", 480, 320)
+    cv2.namedWindow("FaceGuard — Enrollment", cv2.WINDOW_AUTOSIZE)
 
     encodings: list = []
     captured = 0
@@ -269,7 +269,9 @@ def enroll() -> None:
         status = f"Captured: {captured}   |   SPACE = snap   Q = finish"
         cv2.putText(display, status, (10, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 90), 2)
-        cv2.imshow("FaceGuard — Enrollment", display)
+        h, w = display.shape[:2]
+        preview = cv2.resize(display, (PREVIEW_WIDTH, int(h * PREVIEW_WIDTH / w)))
+        cv2.imshow("FaceGuard — Enrollment", preview)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
@@ -325,8 +327,7 @@ def monitor(tolerance: float, interval: float, streak_limit: int,
         sys.exit("ERROR: Cannot open camera. Check System Settings → Privacy → Camera.")
 
     if show_preview:
-        cv2.namedWindow("FaceGuard — Monitor", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("FaceGuard — Monitor", 480, 320)
+        cv2.namedWindow("FaceGuard — Monitor", cv2.WINDOW_AUTOSIZE)
 
     grabber = _FrameGrabber(cap)
 
@@ -358,7 +359,8 @@ def monitor(tolerance: float, interval: float, streak_limit: int,
                 unknown_streak = 0
                 if show_preview:
                     _draw_status(frame, "No face", (180, 180, 180), 0, 1)
-                    cv2.imshow("FaceGuard — Monitor", frame)
+                    _h, _w = frame.shape[:2]
+                    cv2.imshow("FaceGuard — Monitor", cv2.resize(frame, (PREVIEW_WIDTH, int(_h * PREVIEW_WIDTH / _w))))
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
                 time.sleep(interval)
@@ -423,7 +425,8 @@ def monitor(tolerance: float, interval: float, streak_limit: int,
                 streak_label = f"Streak: {unknown_streak}/{streak_limit}"
                 status_color = (0, 60, 255) if unknown_streak > 0 else (0, 220, 90)
                 _draw_status(frame, streak_label, status_color, unknown_streak, streak_limit)
-                cv2.imshow("FaceGuard — Monitor", frame)
+                _h, _w = frame.shape[:2]
+                cv2.imshow("FaceGuard — Monitor", cv2.resize(frame, (PREVIEW_WIDTH, int(_h * PREVIEW_WIDTH / _w))))
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
