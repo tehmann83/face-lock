@@ -1,0 +1,17 @@
+# Credentials
+.env
+
+# Face data (personal — each user enrolls their own)
+*.pkl
+
+# Intruder snapshots (can be large)
+.faceguard_snapshots/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Editor / local tooling state
+.vscode/
