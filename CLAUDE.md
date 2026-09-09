@@ -37,12 +37,13 @@ Single-file app: `faceguard.py`. All logic lives there.
    - tracks two independent streak counters: `unknown_streak` and `no_face_streak`
    - calls `lock_screen()` when streak limit hit and cooldown elapsed
 
-**Lock trigger logic** (`monitor()` lines 283–355):
-- Unknown face seen AND owner NOT present AND owner NOT seen within `OWNER_GRACE` (5s) → increment `unknown_streak`; lock when streak ≥ `--streak`
+**Lock trigger logic** (`monitor()` lines 404–435):
+- Unknown face seen AND owner NOT present AND owner NOT seen within `owner_grace` (1.5s, `--owner-grace`) → increment `unknown_streak`; lock when streak ≥ `--streak`
+- Grace-suppressed unknown faces log `⏳ Unknown face ignored`, throttled to 1/s
 - No face visible → increment `no_face_streak`; lock when streak ≥ `--no-face-streak`
 - 15-second `LOCK_COOLDOWN` prevents rapid re-locking
 
-**`lock_screen()`** tries three macOS methods in order: CGSession → AppleScript Cmd+Ctrl+Q → `pmset sleepnow`. First success wins.
+**`lock_screen()`** tries three macOS methods in order: CGSession → AppleScript Cmd+Ctrl+Q → `pmset sleepnow`. First success wins. Called *before* `send_telegram_alert()` — network I/O must never delay the lock.
 
 **Telegram alerts** (`send_telegram_alert()`): uses only stdlib `urllib.request`; multipart POST to `api.telegram.org/bot{token}/sendPhoto`. Credentials loaded from `.env` via `_load_dotenv()` (does not override existing env vars).
 
@@ -57,7 +58,8 @@ Single-file app: `faceguard.py`. All logic lives there.
 | `FRAMES_TO_LOCK` | 2 | `--streak` |
 | `NO_FACE_FRAMES_TO_LOCK` | 6 | `--no-face-streak` |
 | `LOCK_COOLDOWN` | 15s | — |
-| `OWNER_GRACE` | 5.0s | — |
+| `OWNER_GRACE` | 1.5s | `--owner-grace` |
+| `DETECT_SCALE` | 0.33 | — |
 
 ## Runtime permissions required (macOS)
 
