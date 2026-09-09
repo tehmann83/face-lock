@@ -37,16 +37,18 @@ Single-file app: `faceguard.py`. All logic lives there.
    - tracks two independent streak counters: `unknown_streak` and `no_face_streak`
    - calls `lock_screen()` when streak limit hit and cooldown elapsed
 
-**Lock trigger logic** (`monitor()` lines 283–355):
-- Unknown face seen AND owner NOT present AND owner NOT seen within `OWNER_GRACE` (5s) → increment `unknown_streak`; lock when streak ≥ `--streak`
+**Lock trigger logic** (`monitor()` lines 404–435):
+- Unknown face seen AND owner NOT present AND owner NOT seen within `owner_grace` (5.0s, `--owner-grace`) → increment `unknown_streak`; lock when streak ≥ `--streak`
+- Grace-suppressed unknown faces log `⏳ Unknown face ignored`, throttled to 1/s
 - No face visible → increment `no_face_streak`; lock when streak ≥ `--no-face-streak`
+- Before locking, `_still_unknown_at_full_res()` re-detects and re-encodes on the full-resolution frame. Detection at `DETECT_SCALE` can return a partial box on an occluded face, scoring the owner as unknown (measured 0.72 vs 0.37 at full res). If the re-check recognizes anyone, the lock is cancelled and the frame counts as an owner sighting. Costs ~410ms, paid only on the lock frame.
 - 15-second `LOCK_COOLDOWN` prevents rapid re-locking
 
-**`lock_screen()`** tries three macOS methods in order: CGSession → AppleScript Cmd+Ctrl+Q → `pmset sleepnow`. First success wins.
+**`lock_screen()`** tries three macOS methods in order: CGSession → AppleScript Cmd+Ctrl+Q → `pmset sleepnow`. First success wins. Called *before* `send_telegram_alert()` — network I/O must never delay the lock.
 
 **Telegram alerts** (`send_telegram_alert()`): uses only stdlib `urllib.request`; multipart POST to `api.telegram.org/bot{token}/sendPhoto`. Credentials loaded from `.env` via `_load_dotenv()` (does not override existing env vars).
 
-**Snapshot saving**: `save_snapshot()` writes JPEG to `~/.faceguard_snapshots/intruder_YYYYMMDD_HHMMSS.jpg` before every lock.
+**Snapshot saving**: `save_snapshot()` writes JPEG to `~/.faceguard_snapshots/intruder_YYYYMMDD_HHMMSS.jpg` before every lock. Always the clean frame — preview annotations are drawn on a separate copy.
 
 ## Key constants (top of file, overridable via flags)
 
@@ -57,7 +59,8 @@ Single-file app: `faceguard.py`. All logic lives there.
 | `FRAMES_TO_LOCK` | 2 | `--streak` |
 | `NO_FACE_FRAMES_TO_LOCK` | 6 | `--no-face-streak` |
 | `LOCK_COOLDOWN` | 15s | — |
-| `OWNER_GRACE` | 5.0s | — |
+| `OWNER_GRACE` | 5.0s | `--owner-grace` |
+| `DETECT_SCALE` | 0.5 | — | (do not lower — see lock trigger logic)
 
 ## Runtime permissions required (macOS)
 

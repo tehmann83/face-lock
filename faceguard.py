@@ -92,7 +92,10 @@ SNAPSHOTS_DIR   = Path.home() / ".faceguard_snapshots"
 TOLERANCE       = 0.55   # 0.4 = very strict, 0.6 = lenient
 CHECK_INTERVAL  = 0.2    # seconds between recognition checks (idle; skipped while streak builds)
 FRAMES_TO_LOCK       = 2   # consecutive unknown-face frames needed to trigger lock
-DETECT_SCALE         = 0.5 # resize factor before face detection — 4× faster, same accuracy
+DETECT_SCALE         = 0.5 # resize factor before face detection — 4× faster than full res.
+                           # Do not lower: at 0.33 a partially occluded face (e.g. hand over
+                           # mouth) yields a partial detection box, and encoding that strip
+                           # scores the owner as unknown (measured 0.72 vs 0.37 at full res).
 PREVIEW_WIDTH        = 320 # preview window display width in pixels
 LOCK_COOLDOWN        = 15  # seconds to wait before locking again
 OWNER_GRACE          = 5.0 # seconds: suppress locking if owner was seen this recently
@@ -179,6 +182,30 @@ def send_telegram_alert(snap_path: Path) -> None:
         print("  📨 Telegram alert sent.")
     except Exception as exc:
         print(f"  ⚠  Telegram alert failed: {exc}")
+
+
+def _still_unknown_at_full_res(frame: np.ndarray, known_encodings: list,
+                               tolerance: float) -> bool:
+    """Re-check a lock candidate on the full-resolution frame.
+
+    Detection runs on a DETECT_SCALE copy for speed, which can return a partial
+    box when the face is occluded — encoding that strip scores even the owner as
+    unknown. Full-res detection recovers the whole face. Costs ~400ms on 1080p,
+    paid only on the frame that would otherwise lock, so it never slows the
+    common case. Returns True if the frame still contains no recognized face.
+    """
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    locations = face_recognition.face_locations(rgb, model="hog")
+    if not locations:
+        # Nothing resolvable at full res either — do not lock on a phantom.
+        print("  ✋ Lock cancelled — no face found on full-res re-check.")
+        return False
+    for enc in face_recognition.face_encodings(rgb, locations):
+        distance = face_recognition.face_distance(known_encodings, enc).min()
+        if distance < tolerance:
+            print(f"  ✋ Lock cancelled — full-res re-check recognized you ({distance:.2f}).")
+            return False
+    return True
 
 
 # ── macOS screen lock ──────────────────────────────────────────────────────────
@@ -300,7 +327,7 @@ def enroll() -> None:
 
 # ── Monitor ───────────────────────────────────────────────────────────────────
 def monitor(tolerance: float, interval: float, streak_limit: int,
-            show_preview: bool) -> None:
+            show_preview: bool, owner_grace: float = OWNER_GRACE) -> None:
     """
     Continuously read from the camera. If a face is detected that does NOT
     match the enrolled encodings for `streak_limit` consecutive checks,
@@ -319,6 +346,7 @@ def monitor(tolerance: float, interval: float, streak_limit: int,
     print(f"  Tolerance        : {tolerance}  (lower = stricter)")
     print(f"  Check interval   : {interval}s")
     print(f"  Streak to lock   : {streak_limit} frames")
+    print(f"  Owner grace      : {owner_grace}s")
     print(f"  Preview window   : {'yes' if show_preview else 'no'}")
     print("\nPress Ctrl+C to stop.\n")
 
@@ -333,6 +361,7 @@ def monitor(tolerance: float, interval: float, streak_limit: int,
 
     last_lock_time = 0.0
     last_owner_seen = 0.0
+    last_grace_log = 0.0
     unknown_streak = 0
     needs_recovery = False
 
@@ -348,6 +377,10 @@ def monitor(tolerance: float, interval: float, streak_limit: int,
             if not ret:
                 time.sleep(0.05)
                 continue
+
+            # Preview drawing annotates `frame` in place; keep a clean copy so the
+            # saved evidence is the raw camera image, not one with boxes on it.
+            clean_frame = frame.copy() if show_preview else frame
 
             # Scale down for faster detection — coordinates later scaled back for display
             small = cv2.resize(frame, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
@@ -400,22 +433,36 @@ def monitor(tolerance: float, interval: float, streak_limit: int,
             # ── Update streak & maybe lock ────────────────────────────────────
             # Don't lock if the owner is present or was seen recently — covers
             # frames where detection momentarily misses the owner's face.
-            owner_recently_seen = (time.time() - last_owner_seen) < OWNER_GRACE
+            owner_recently_seen = (time.time() - last_owner_seen) < owner_grace
             if intruder_detected and not owner_present and not owner_recently_seen:
                 unknown_streak += 1
                 print(f"  ⚠  Unknown face — streak {unknown_streak}/{streak_limit}")
                 if unknown_streak >= streak_limit:
                     unknown_streak = 0
                     now = time.time()
-                    if now - last_lock_time > LOCK_COOLDOWN:
-                        snap = save_snapshot(frame)
+                    if not _still_unknown_at_full_res(clean_frame, known_encodings, tolerance):
+                        # Small-scale detection was wrong about this face — treat the
+                        # frame as an owner sighting so the grace window covers it.
+                        last_owner_seen = now
+                    elif now - last_lock_time > LOCK_COOLDOWN:
+                        snap = save_snapshot(clean_frame)
                         print(f"  📸 Snapshot saved → {snap}")
-                        send_telegram_alert(snap)
+                        # Lock first, alert after: the Telegram round-trip must never
+                        # delay the lock (~0.4s typical, up to 15s on a bad network).
                         print("  🔒 LOCKING SCREEN")
                         lock_screen()
                         last_lock_time = now
                         needs_recovery = True
+                        send_telegram_alert(snap)
             else:
+                if intruder_detected and not owner_present:
+                    # Grace window is swallowing an unknown face — say so, throttled
+                    # to 1/s, otherwise this is invisible and looks like a slow lock.
+                    _now = time.time()
+                    if _now - last_grace_log > 1.0:
+                        last_grace_log = _now
+                        print(f"  ⏳ Unknown face ignored — owner seen "
+                              f"{_now - last_owner_seen:.1f}s ago (grace {owner_grace}s)")
                 if unknown_streak > 0:
                     msg = "owner present with guest" if intruder_detected else "known face confirmed"
                     print(f"  ✓  {msg} — resetting streak.")
@@ -477,6 +524,9 @@ def main() -> None:
                         help=f"Seconds between checks (default {CHECK_INTERVAL})")
     parser.add_argument("--streak",      type=int,   default=FRAMES_TO_LOCK,
                         help=f"Consecutive unknown frames to trigger lock (default {FRAMES_TO_LOCK})")
+    parser.add_argument("--owner-grace", type=float, default=OWNER_GRACE,
+                        help=f"Seconds after last owner sighting during which locking is "
+                             f"suppressed (default {OWNER_GRACE})")
     parser.add_argument("--no-preview",  action="store_true",
                         help="Run silently without camera preview window")
     args = parser.parse_args()
@@ -497,6 +547,7 @@ def main() -> None:
         tolerance=args.tolerance,
         interval=args.interval,
         streak_limit=args.streak,
+        owner_grace=args.owner_grace,
         show_preview=not args.no_preview,
     )
 
