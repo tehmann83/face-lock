@@ -92,11 +92,13 @@ SNAPSHOTS_DIR   = Path.home() / ".faceguard_snapshots"
 TOLERANCE       = 0.55   # 0.4 = very strict, 0.6 = lenient
 CHECK_INTERVAL  = 0.2    # seconds between recognition checks (idle; skipped while streak builds)
 FRAMES_TO_LOCK       = 2   # consecutive unknown-face frames needed to trigger lock
-DETECT_SCALE         = 0.33# resize factor before face detection — ~42ms/frame vs ~98ms at 0.5
-                           # (0.25 is faster but drops faces below ~150px, i.e. across the room)
+DETECT_SCALE         = 0.5 # resize factor before face detection — 4× faster than full res.
+                           # Do not lower: at 0.33 a partially occluded face (e.g. hand over
+                           # mouth) yields a partial detection box, and encoding that strip
+                           # scores the owner as unknown (measured 0.72 vs 0.37 at full res).
 PREVIEW_WIDTH        = 320 # preview window display width in pixels
 LOCK_COOLDOWN        = 15  # seconds to wait before locking again
-OWNER_GRACE          = 1.5 # seconds: suppress locking if owner was seen this recently
+OWNER_GRACE          = 5.0 # seconds: suppress locking if owner was seen this recently
 
 
 # ── Background frame grabber ──────────────────────────────────────────────────
@@ -180,6 +182,30 @@ def send_telegram_alert(snap_path: Path) -> None:
         print("  📨 Telegram alert sent.")
     except Exception as exc:
         print(f"  ⚠  Telegram alert failed: {exc}")
+
+
+def _still_unknown_at_full_res(frame: np.ndarray, known_encodings: list,
+                               tolerance: float) -> bool:
+    """Re-check a lock candidate on the full-resolution frame.
+
+    Detection runs on a DETECT_SCALE copy for speed, which can return a partial
+    box when the face is occluded — encoding that strip scores even the owner as
+    unknown. Full-res detection recovers the whole face. Costs ~400ms on 1080p,
+    paid only on the frame that would otherwise lock, so it never slows the
+    common case. Returns True if the frame still contains no recognized face.
+    """
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    locations = face_recognition.face_locations(rgb, model="hog")
+    if not locations:
+        # Nothing resolvable at full res either — do not lock on a phantom.
+        print("  ✋ Lock cancelled — no face found on full-res re-check.")
+        return False
+    for enc in face_recognition.face_encodings(rgb, locations):
+        distance = face_recognition.face_distance(known_encodings, enc).min()
+        if distance < tolerance:
+            print(f"  ✋ Lock cancelled — full-res re-check recognized you ({distance:.2f}).")
+            return False
+    return True
 
 
 # ── macOS screen lock ──────────────────────────────────────────────────────────
@@ -352,6 +378,10 @@ def monitor(tolerance: float, interval: float, streak_limit: int,
                 time.sleep(0.05)
                 continue
 
+            # Preview drawing annotates `frame` in place; keep a clean copy so the
+            # saved evidence is the raw camera image, not one with boxes on it.
+            clean_frame = frame.copy() if show_preview else frame
+
             # Scale down for faster detection — coordinates later scaled back for display
             small = cv2.resize(frame, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
             rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
@@ -410,8 +440,12 @@ def monitor(tolerance: float, interval: float, streak_limit: int,
                 if unknown_streak >= streak_limit:
                     unknown_streak = 0
                     now = time.time()
-                    if now - last_lock_time > LOCK_COOLDOWN:
-                        snap = save_snapshot(frame)
+                    if not _still_unknown_at_full_res(clean_frame, known_encodings, tolerance):
+                        # Small-scale detection was wrong about this face — treat the
+                        # frame as an owner sighting so the grace window covers it.
+                        last_owner_seen = now
+                    elif now - last_lock_time > LOCK_COOLDOWN:
+                        snap = save_snapshot(clean_frame)
                         print(f"  📸 Snapshot saved → {snap}")
                         # Lock first, alert after: the Telegram round-trip must never
                         # delay the lock (~0.4s typical, up to 15s on a bad network).
